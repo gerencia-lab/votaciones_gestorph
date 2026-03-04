@@ -1,0 +1,99 @@
+body {
+    font-family: 'Inter', sans-serif;
+    background-color: #f8fafc;
+    color: #1e293b;
+    margin: 0;
+}
+
+/* Refuerzo de contraste para inputs contra Dark Mode forzado por navegadores */
+input, select, textarea {
+  background-color: #ffffff !important;
+  color: #0f172a !important;
+  border-color: #e2e8f0 !important;
+}
+
+input:focus {
+  border-color: #4f46e5 !important;
+  box-shadow: 0 0 0 2px rgba(79, 70, 229, 0.1) !important;
+}
+
+input::placeholder {
+  color: #94a3b8 !important;
+  opacity: 1 !important;
+}
+
+.voter-btn {
+  min-height: 56px;
+  font-size: 1.125rem;
+}
+
+/* Splash Screen Loading State */
+#root:empty {
+  background-color: #f8fafc;
+  height: 100vh;
+  width: 100vw;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  position: fixed;
+  top: 0;
+  left: 0;
+}
+
+#root:empty::before {
+  content: '';
+  width: 60px;
+  height: 60px;
+  border: 5px solid #e2e8f0;
+  border-top: 5px solid #4f46e5;
+  border-radius: 50%;
+  margin-bottom: 24px;
+  animation: spin 0.8s cubic-bezier(0.68, -0.55, 0.27, 1.55) infinite;
+  box-shadow: 0 10px 25px -5px rgba(79, 70, 229, 0.2);
+}
+
+#root:empty::after {
+  content: 'GESTORPH';
+  font-family: 'Inter', sans-serif;
+  font-weight: 900;
+  font-size: 16px;
+  letter-spacing: 0.4em;
+  color: #1e293b;
+  text-indent: 0.4em; /* Corregir centrado por el letter-spacing */
+  animation: pulse-text 2s ease-in-out infinite;
+}
+
+/* Animaciones para el Loader */
+@keyframes spin {
+  0% { transform: rotate(0deg); }
+  100% { transform: rotate(360deg); }
+}
+
+@keyframes pulse-text {
+  0%, 100% { 
+    opacity: 0.4;
+    transform: scale(0.98);
+  }
+  50% { 
+    opacity: 1;
+    transform: scale(1);
+    color: #4f46e5;
+  }
+}
+
+@media print {
+  .no-print {
+    display: none !important;
+  }
+  .print-break-after {
+    page-break-after: always;
+  }
+  body {
+    background-color: white !important;
+  }
+}
+
+.recharts-responsive-container {
+  min-width: 0;
+}
