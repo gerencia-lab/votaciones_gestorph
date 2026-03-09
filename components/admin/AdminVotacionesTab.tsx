@@ -3,15 +3,19 @@ import { useAssembly } from '../../store/AssemblyContext.tsx';
 import {
   PlusCircle, BarChart, Edit2, Play, Square, X,
   Clock, ListPlus, ChevronDown, Trash2, CheckCircle2, Sparkles, RefreshCw, Database, Lock, Zap, ChevronUp, AlertCircle, ToggleLeft, ToggleRight,
-  UserCheck, UserX, ArrowUpDown
+  UserCheck, UserX, ArrowUpDown, GripVertical
 } from 'lucide-react';
 import { PlantillaPregunta, Pregunta } from '../../types.ts';
 
-export const AdminVotacionesTab: React.FC = () => {
+interface AdminVotacionesTabProps {
+  setView?: (view: 'home' | 'voter' | 'admin' | 'projection' | 'superadmin' | 'payments' | 'manual' | 'loyalty') => void;
+}
+
+export const AdminVotacionesTab: React.FC<AdminVotacionesTabProps> = ({ setView }) => {
   const {
     preguntas, asambleas, selectedAsambleaId, addQuestion, updateQuestion, openQuestion,
     closeQuestion, reopenQuestion, calculateResults, votos, plantillas,
-    initializeDatabase, activeQuestion, asambleistas, unidades
+    initializeDatabase, activeQuestion, asambleistas, unidades, reorderQuestions
   } = useAssembly();
 
   const [isModalOpen, setIsModalOpen] = useState(false);
@@ -21,14 +25,26 @@ export const AdminVotacionesTab: React.FC = () => {
   const [viewingVotedFor, setViewingVotedFor] = useState<string | null>(null);
   const [viewingMissingFor, setViewingMissingFor] = useState<string | null>(null);
 
-  // Estado ampliado para incluir esMultiple
-  const [newQuestion, setNewQuestion] = useState({ texto: '', opciones: '', tiempo: '2', esMultiple: false });
+  // Estado ampliado para incluir esMultiple y opciones como array
+  const [newQuestion, setNewQuestion] = useState<{
+    texto: string;
+    opciones: string[];
+    tiempo: string;
+    esMultiple: boolean;
+  }>({ texto: '', opciones: ['', ''], tiempo: '2', esMultiple: false });
 
   const [showTemplatesAccordion, setShowTemplatesAccordion] = useState(false);
   const [isInitializing, setIsInitializing] = useState(false);
 
   const [reopenId, setReopenId] = useState<string | null>(null);
   const [reopenTime, setReopenTime] = useState('2');
+
+  // Estado de Reordenamiento Drag & Drop
+  const [isReorderOpen, setIsReorderOpen] = useState(false);
+  const [reorderList, setReorderList] = useState<Pregunta[]>([]);
+  const [dragIdx, setDragIdx] = useState<number | null>(null);
+  const [overIdx, setOverIdx] = useState<number | null>(null);
+  const [isSavingOrder, setIsSavingOrder] = useState(false);
 
   // Estado de Ordenamiento
   const [sortConfig, setSortConfig] = useState<{
@@ -44,6 +60,12 @@ export const AdminVotacionesTab: React.FC = () => {
     return preguntas
       .filter(p => p.asambleaId === selectedAsambleaId)
       .sort((a, b) => {
+        // Si ambos tienen orden definido, respetar ese orden primero
+        const aOrden = a.orden ?? Infinity;
+        const bOrden = b.orden ?? Infinity;
+        if (aOrden !== bOrden) return aOrden - bOrden;
+
+        // Fallback al sortConfig del usuario
         let aValue: any;
         let bValue: any;
 
@@ -90,7 +112,7 @@ export const AdminVotacionesTab: React.FC = () => {
     e.preventDefault();
     if (isFinished) return;
 
-    const ops = newQuestion.opciones.split(',').map(o => o.trim()).filter(o => o !== '');
+    const ops = newQuestion.opciones.map(o => o.trim()).filter(o => o !== '');
     if (ops.length < 1) return alert("Debe incluir al menos una opción.");
 
     const seconds = parseInt(newQuestion.tiempo) * 60;
@@ -103,7 +125,7 @@ export const AdminVotacionesTab: React.FC = () => {
 
     setIsModalOpen(false);
     setEditingQuestionId(null);
-    setNewQuestion({ texto: '', opciones: '', tiempo: '2', esMultiple: false });
+    setNewQuestion({ texto: '', opciones: ['', ''], tiempo: '2', esMultiple: false });
     setShowTemplatesAccordion(false);
   };
 
@@ -112,7 +134,7 @@ export const AdminVotacionesTab: React.FC = () => {
     setEditingQuestionId(p.id);
     setNewQuestion({
       texto: p.texto,
-      opciones: p.opciones.map(o => o.texto).join(', '),
+      opciones: p.opciones.map(o => o.texto),
       tiempo: String(Math.ceil(p.tiempoRestante / 60)),
       esMultiple: p.esMultiple || false
     });
@@ -124,17 +146,35 @@ export const AdminVotacionesTab: React.FC = () => {
     if (isFinished) return;
     setNewQuestion({
       texto: template.texto,
-      opciones: template.opcionesSugeridas,
+      opciones: template.opcionesSugeridas.split(',').map(o => o.trim()),
       tiempo: String(Math.ceil(template.tiempoSugerido / 60)),
       esMultiple: false
     });
     setShowTemplatesAccordion(false);
   };
 
+  const addOption = () => {
+    setNewQuestion(prev => ({ ...prev, opciones: [...prev.opciones, ''] }));
+  };
+
+  const removeOption = (index: number) => {
+    if (newQuestion.opciones.length <= 1) return;
+    const newOps = [...newQuestion.opciones];
+    newOps.splice(index, 1);
+    setNewQuestion(prev => ({ ...prev, opciones: newOps }));
+  };
+
+  const updateOption = (index: number, value: string) => {
+    const newOps = [...newQuestion.opciones];
+    newOps[index] = value;
+    setNewQuestion(prev => ({ ...prev, opciones: newOps }));
+  };
+
   const handleReopen = async () => {
     if (!reopenId || isFinished || !isStarted) return;
     const seconds = parseInt(reopenTime) * 60;
     await reopenQuestion(reopenId, seconds);
+    if (setView) setView('projection');
     setReopenId(null);
   };
 
@@ -203,6 +243,50 @@ export const AdminVotacionesTab: React.FC = () => {
     }));
   };
 
+  // --- DRAG & DROP HANDLERS ---
+  const openReorderModal = () => {
+    setReorderList([...asambleaPreguntas]);
+    setIsReorderOpen(true);
+  };
+
+  const handleDragStart = (idx: number, e: React.DragEvent) => {
+    setDragIdx(idx);
+    e.dataTransfer.effectAllowed = 'move';
+  };
+
+  const handleDragOver = (idx: number, e: React.DragEvent) => {
+    e.preventDefault();
+    e.dataTransfer.dropEffect = 'move';
+    setOverIdx(idx);
+  };
+
+  const handleDrop = (idx: number) => {
+    if (dragIdx === null || dragIdx === idx) return;
+    const updated = [...reorderList];
+    const [moved] = updated.splice(dragIdx, 1);
+    updated.splice(idx, 0, moved);
+    setReorderList(updated);
+    setDragIdx(null);
+    setOverIdx(null);
+  };
+
+  const handleDragEnd = () => {
+    setDragIdx(null);
+    setOverIdx(null);
+  };
+
+  const handleSaveOrder = async () => {
+    setIsSavingOrder(true);
+    try {
+      await reorderQuestions(reorderList.map(p => p.id));
+      setIsReorderOpen(false);
+    } catch (err) {
+      console.error('Error saving order', err);
+    } finally {
+      setIsSavingOrder(false);
+    }
+  };
+
   const SortButton = ({ column, label }: { column: 'texto' | 'status' | 'createdAt', label: string }) => {
     const isActive = sortConfig.key === column;
     return (
@@ -261,24 +345,34 @@ export const AdminVotacionesTab: React.FC = () => {
             <SortButton column="status" label="Estado" />
           </div>
         </div>
-        <button
-          onClick={() => {
-            if (isFinished) return;
-            if (isVotingInProgress) {
-              alert("Hay una votación en curso. Debe cerrarla antes de crear una nueva.");
-              return;
-            }
-            setEditingQuestionId(null);
-            setNewQuestion({ texto: '', opciones: '', tiempo: '2', esMultiple: false });
-            setShowTemplatesAccordion(false);
-            setIsModalOpen(true);
-          }}
-          disabled={isFinished}
-          className={`px-4 py-2 rounded-xl font-black text-[9px] sm:text-[10px] uppercase flex items-center gap-2 shadow-xl hover:scale-105 transition-transform ${isFinished ? 'bg-slate-300 text-slate-500 cursor-not-allowed opacity-70' : (isVotingInProgress ? 'bg-slate-300 text-slate-500 cursor-not-allowed' : 'bg-indigo-600 text-white')}`}
-        >
-          {isFinished ? <Lock size={14} /> : (isVotingInProgress ? <Lock size={14} /> : <PlusCircle size={14} />)}
-          {isFinished ? 'Bloqueado' : 'Crear Votación'}
-        </button>
+        <div className="flex items-center gap-2">
+          {asambleaPreguntas.length > 1 && !isFinished && (
+            <button
+              onClick={openReorderModal}
+              className="px-3 py-2 rounded-xl font-black text-[9px] sm:text-[10px] uppercase flex items-center gap-1.5 bg-slate-700 text-white shadow-lg hover:bg-slate-800 hover:scale-105 transition-all"
+            >
+              <ArrowUpDown size={14} /> Ordenar
+            </button>
+          )}
+          <button
+            onClick={() => {
+              if (isFinished) return;
+              if (isVotingInProgress) {
+                alert("Hay una votación en curso. Debe cerrarla antes de crear una nueva.");
+                return;
+              }
+              setEditingQuestionId(null);
+              setNewQuestion({ texto: '', opciones: ['', ''], tiempo: '2', esMultiple: false });
+              setShowTemplatesAccordion(false);
+              setIsModalOpen(true);
+            }}
+            disabled={isFinished}
+            className={`px-4 py-2 rounded-xl font-black text-[9px] sm:text-[10px] uppercase flex items-center gap-2 shadow-xl hover:scale-105 transition-transform ${isFinished ? 'bg-slate-300 text-slate-500 cursor-not-allowed opacity-70' : (isVotingInProgress ? 'bg-slate-300 text-slate-500 cursor-not-allowed' : 'bg-indigo-600 text-white')}`}
+          >
+            {isFinished ? <Lock size={14} /> : (isVotingInProgress ? <Lock size={14} /> : <PlusCircle size={14} />)}
+            {isFinished ? 'Bloqueado' : 'Crear Votación'}
+          </button>
+        </div>
       </div>
 
       <div className="grid grid-cols-1 gap-4">
@@ -336,7 +430,10 @@ export const AdminVotacionesTab: React.FC = () => {
                         <Edit2 size={16} />
                       </button>
                       <button
-                        onClick={() => openQuestion(p.id)}
+                        onClick={() => {
+                          openQuestion(p.id);
+                          if (setView) setView('projection');
+                        }}
                         disabled={!isStarted || isVotingInProgress || isFinished}
                         className={`p-2.5 rounded-xl transition-colors shadow-lg ${(!isStarted || isVotingInProgress || isFinished) ? 'bg-slate-200 text-slate-400 cursor-not-allowed' : 'bg-indigo-600 text-white hover:bg-indigo-700'}`}
                         title={!isStarted ? "Debe Iniciar la Asamblea primero" : (isVotingInProgress ? "Ya hay una votación activa" : "Abrir Votación")}
@@ -475,9 +572,63 @@ export const AdminVotacionesTab: React.FC = () => {
         </div>
       )}
 
+      {/* --- MODAL DE REORDENAMIENTO DRAG & DROP --- */}
+      {isReorderOpen && (
+        <div className="fixed inset-0 z-[160] flex items-center justify-center p-4 bg-slate-900/50 backdrop-blur-sm">
+          <div className="bg-white rounded-[32px] w-full max-w-2xl shadow-2xl overflow-hidden animate-in zoom-in duration-200 flex flex-col max-h-[80vh]">
+            <div className="p-5 border-b flex justify-between items-center shrink-0">
+              <h3 className="font-black text-sm uppercase tracking-wide text-slate-900 flex items-center gap-2">
+                <ArrowUpDown size={18} className="text-indigo-600" />
+                Ordenar Puntos del Día
+              </h3>
+              <button onClick={() => setIsReorderOpen(false)} className="text-slate-400 hover:text-slate-900"><X size={20} /></button>
+            </div>
+            <div className="overflow-y-auto custom-scrollbar p-4 space-y-1">
+              {reorderList.map((p, idx) => (
+                <div
+                  key={p.id}
+                  draggable
+                  onDragStart={(e) => handleDragStart(idx, e)}
+                  onDragOver={(e) => handleDragOver(idx, e)}
+                  onDrop={() => handleDrop(idx)}
+                  onDragEnd={handleDragEnd}
+                  className={`flex items-center gap-3 px-4 py-3 rounded-2xl border-2 transition-all cursor-grab active:cursor-grabbing select-none ${dragIdx === idx ? 'opacity-40 scale-95 border-indigo-300 bg-indigo-50' :
+                    overIdx === idx ? 'border-indigo-400 bg-indigo-50 shadow-lg' :
+                      'border-slate-100 bg-white hover:border-slate-200'
+                    }`}
+                >
+                  <GripVertical size={16} className="text-slate-300 shrink-0" />
+                  <span className="w-6 h-6 rounded-full bg-slate-100 flex items-center justify-center text-[10px] font-black text-slate-500 shrink-0">
+                    {idx + 1}
+                  </span>
+                  <span className="flex-1 text-xs font-bold text-slate-800 truncate">{p.texto}</span>
+                  <span className={`px-2 py-0.5 rounded text-[7px] font-black uppercase tracking-widest shrink-0 ${p.status === 'ABIERTA' ? 'bg-emerald-100 text-emerald-700' :
+                    p.status === 'CERRADA' ? 'bg-slate-100 text-slate-500' :
+                      'bg-amber-100 text-amber-700'
+                    }`}>
+                    {p.status}
+                  </span>
+                </div>
+              ))}
+            </div>
+            <div className="p-4 border-t bg-slate-50 shrink-0 flex justify-between items-center">
+              <p className="text-[10px] font-bold text-slate-400 uppercase">{reorderList.length} puntos</p>
+              <button
+                onClick={handleSaveOrder}
+                disabled={isSavingOrder}
+                className="px-5 py-2.5 bg-indigo-600 text-white rounded-xl font-black text-[10px] uppercase tracking-widest shadow-lg hover:bg-indigo-700 hover:scale-105 active:scale-95 transition-all disabled:opacity-50 flex items-center gap-2"
+              >
+                {isSavingOrder ? <RefreshCw size={14} className="animate-spin" /> : <CheckCircle2 size={14} />}
+                Guardar Orden
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {isModalOpen && !isFinished && (
         <div className="fixed inset-0 z-[150] flex items-end sm:items-center justify-center p-0 sm:p-4 bg-slate-900/60 backdrop-blur-sm">
-          <div className="bg-white rounded-t-[32px] sm:rounded-[40px] w-full max-w-lg shadow-2xl overflow-hidden animate-in slide-in-from-bottom sm:zoom-in duration-300 flex flex-col max-h-[90vh]">
+          <div className="bg-white rounded-t-[32px] sm:rounded-[40px] w-full max-w-2xl shadow-2xl overflow-hidden animate-in slide-in-from-bottom sm:zoom-in duration-300 flex flex-col max-h-[90vh]">
 
             {/* Modal Header */}
             <div className="p-6 border-b flex justify-between items-center bg-white shrink-0">
@@ -545,15 +696,46 @@ export const AdminVotacionesTab: React.FC = () => {
                   />
                 </div>
 
-                <div className="space-y-1">
-                  <label className="text-xs font-black uppercase text-slate-400 ml-1">Opciones (separadas por coma)</label>
-                  <input
-                    required
-                    placeholder="Ej: SÍ, NO"
-                    value={newQuestion.opciones}
-                    onChange={e => setNewQuestion({ ...newQuestion, opciones: e.target.value })}
-                    className="w-full px-4 py-3 bg-white border border-slate-200 rounded-xl font-bold text-sm focus:outline-indigo-600 focus:ring-4 focus:ring-indigo-100 transition-all shadow-sm"
-                  />
+                <div className="space-y-3">
+                  <div className="flex justify-between items-center ml-1">
+                    <label className="text-xs font-black uppercase text-slate-400">Opciones de Respuesta</label>
+                    <button
+                      type="button"
+                      onClick={addOption}
+                      className="text-[10px] font-black uppercase text-indigo-600 hover:text-indigo-700 flex items-center gap-1 bg-indigo-50 px-2 py-1 rounded-lg transition-colors"
+                    >
+                      <PlusCircle size={12} /> Añadir Opción
+                    </button>
+                  </div>
+
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-4 gap-y-3 max-h-60 overflow-y-auto px-1 py-1 custom-scrollbar">
+                    {newQuestion.opciones.map((opcion, index) => (
+                      <div key={index} className="flex gap-2 animate-in slide-in-from-left-2 duration-200">
+                        <div className="flex-1 relative">
+                          <div className="absolute left-3 top-1/2 -translate-y-1/2 w-5 h-5 rounded-full bg-slate-100 flex items-center justify-center text-[10px] font-black text-slate-400">
+                            {index + 1}
+                          </div>
+                          <input
+                            required
+                            placeholder={`Opción ${index + 1}`}
+                            value={opcion}
+                            onChange={e => updateOption(index, e.target.value)}
+                            className="w-full pl-10 pr-4 py-2.5 bg-white border border-slate-200 rounded-xl font-bold text-sm focus:border-indigo-600 transition-colors shadow-sm"
+                          />
+                        </div>
+                        {newQuestion.opciones.length > 1 && (
+                          <button
+                            type="button"
+                            onClick={() => removeOption(index)}
+                            className="p-2 text-slate-300 hover:text-red-500 hover:bg-red-50 rounded-xl transition-all"
+                            title="Eliminar opción"
+                          >
+                            <Trash2 size={16} />
+                          </button>
+                        )}
+                      </div>
+                    ))}
+                  </div>
                   <p className="text-[10px] text-slate-400 pl-2 italic">Nota: El sistema calculará automáticamente los "Sin Votar".</p>
                 </div>
 

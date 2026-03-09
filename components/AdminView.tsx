@@ -86,6 +86,14 @@ export const AdminView: React.FC<AdminViewProps> = ({ setView }) => {
    }, [currentUnidades, asambleistas, selectedAsambleaId]);
 
    useEffect(() => {
+      const savedTab = sessionStorage.getItem('adminActiveTab');
+      if (savedTab && (savedTab === 'votaciones' || savedTab === 'asistencia' || savedTab === 'unidades' || savedTab === 'acta_ia')) {
+         setActiveTab(savedTab as any);
+         sessionStorage.removeItem('adminActiveTab');
+      }
+   }, []);
+
+   useEffect(() => {
       if (!currentAdmin) setView('home');
       else {
          setProfileForm({
@@ -802,7 +810,7 @@ export const AdminView: React.FC<AdminViewProps> = ({ setView }) => {
             {/* CONTENIDO TABS ... */}
             <div className={`min-h-[500px] ${modalType === 'MINUTES' ? 'print:hidden' : ''}`}>
                {activeTab === 'asistencia' && <AdminAsistenciaTab />}
-               {activeTab === 'votaciones' && <AdminVotacionesTab />}
+               {activeTab === 'votaciones' && <AdminVotacionesTab setView={setView} />}
                {activeTab === 'unidades' && <AdminUnidadesTab />}
                {activeTab === 'acta_ia' && <AdminActaIATab />}
             </div>

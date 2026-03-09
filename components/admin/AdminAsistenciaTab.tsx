@@ -1,11 +1,12 @@
 
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useEffect, useCallback, useRef } from 'react';
 import { useAssembly } from '../../store/AssemblyContext.tsx';
-import { Search, QrCode, X, Printer, Loader2, UserPlus, Ticket, CheckSquare, Square, LogOut, CheckCircle2, Mail, Key, Lock, AlertTriangle, Calculator, Scissors, UserCog, Trash2, Eraser, ChevronUp, ChevronDown, ArrowUpDown } from 'lucide-react';
+import { Search, QrCode, X, Printer, Loader2, UserPlus, Ticket, CheckSquare, Square, LogOut, CheckCircle2, Mail, Key, Lock, AlertTriangle, Calculator, Scissors, UserCog, Trash2, Eraser, ChevronUp, ChevronDown, ArrowUpDown, Camera } from 'lucide-react';
 import { QRCodeCanvas } from 'qrcode.react';
 import { createPortal } from 'react-dom';
 import { Asambleista, Unidad } from '../../types.ts';
 import { PRODUCTION_DOMAIN } from '../../constants.tsx';
+import { Html5QrcodeScanner, Html5Qrcode } from 'html5-qrcode';
 
 export const AdminAsistenciaTab: React.FC<any> = () => {
   const {
@@ -18,11 +19,17 @@ export const AdminAsistenciaTab: React.FC<any> = () => {
   const [selectedForQR, setSelectedForQR] = useState<any | null>(null);
   const [isVoterModalOpen, setIsVoterModalOpen] = useState(false);
   const [isMassPrintOpen, setIsMassPrintOpen] = useState(false);
+  const [isProxyReportOpen, setIsProxyReportOpen] = useState(false);
+  const [isScannerOpen, setIsScannerOpen] = useState(false);
   const [loadingId, setLoadingId] = useState<string | null>(null);
   const [creatingTokenId, setCreatingTokenId] = useState<string | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [isGenerating, setIsGenerating] = useState(false);
   const [isClearing, setIsClearing] = useState(false);
+  const [scanFeedback, setScanFeedback] = useState<{ message: string, type: 'success' | 'error' | 'info' } | null>(null);
+  const [cameraError, setCameraError] = useState<string | null>(null);
+  const [activeCameraId, setActiveCameraId] = useState<string | null>(null);
+  const [availableCameras, setAvailableCameras] = useState<MediaDeviceInfo[]>([]);
 
   const [selectedAsmIds, setSelectedAsmIds] = useState<string[]>([]);
   const [isBulkProcessing, setIsBulkProcessing] = useState(false);
@@ -108,6 +115,169 @@ export const AdminAsistenciaTab: React.FC<any> = () => {
     return result;
   }, [currentUnidades, searchTerm, sortConfig, getAsambleistaByUnit]);
 
+  // Manejo de lectura de escáner
+  const lastScannedRef = useRef<{ token: string, time: number }>({ token: '', time: 0 });
+
+  const handleScanToken = useCallback(async (scannedText: string) => {
+    if (isFinished || loadingId) return;
+
+    let token = scannedText.trim();
+
+    // Throttling: Evitar procesar el mismo código muy seguido (3 segundos)
+    const now = Date.now();
+    if (token === lastScannedRef.current.token && (now - lastScannedRef.current.time) < 3000) {
+      return;
+    }
+    lastScannedRef.current = { token, time: now };
+
+    // Si lo escaneado es una URL completa (ej: de la credencial impresa), extraer el token
+    try {
+      if (token.includes('?token=')) {
+        const url = new URL(token.startsWith('http') ? token : `https://${token}`);
+        const tokenParam = url.searchParams.get('token');
+        if (tokenParam) token = tokenParam;
+      }
+    } catch (e) {
+      // Si falla el parseo de URL, usamos el texto original
+      console.warn("No se pudo parsear como URL, usando texto crudo");
+    }
+
+    const asm = currentAsambleistas.find(a => a.token === token);
+    if (asm) {
+      if (!asm.asistenciaConfirmada) {
+        setLoadingId(asm.id);
+        try {
+          await toggleAttendance(asm.id);
+          setScanFeedback({ message: `¡Ingreso registrado: ${asm.nombre}!`, type: 'success' });
+        } catch (e) {
+          setScanFeedback({ message: `Error al registrar asistencia.`, type: 'error' });
+        } finally {
+          setLoadingId(null);
+        }
+      } else {
+        setScanFeedback({ message: `${asm.nombre} ya se encuentra en SALA.`, type: 'info' });
+      }
+    } else {
+      const unit = currentUnidades.find(u => u.token === token);
+      if (unit) {
+        setScanFeedback({ message: `La unidad ${unit.nombre} no ha sido activada.`, type: 'error' });
+      } else {
+        setScanFeedback({ message: `Código QR no reconocido.`, type: 'error' });
+      }
+    }
+
+    setTimeout(() => setScanFeedback(null), 4000);
+  }, [isFinished, loadingId, currentAsambleistas, currentUnidades, toggleAttendance]);
+
+  // Efecto para Escáner Físico (Teclado Rápido)
+  useEffect(() => {
+    let scannedChars = '';
+    let lastKeyTime = Date.now();
+
+    const handleKeyDown = (e: KeyboardEvent) => {
+      // Ignorar si el usuario está escribiendo en el buscador o modal
+      if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) {
+        return;
+      }
+      if (isVoterModalOpen || isMassPrintOpen || isScannerOpen) return;
+
+      const currentTime = Date.now();
+      if (currentTime - lastKeyTime > 50) {
+        scannedChars = ''; // Reset si el tiempo entre teclas es muy grande para ser un escáner
+      }
+
+      if (e.key === 'Enter') {
+        if (scannedChars.trim().length > 5) {
+          handleScanToken(scannedChars.trim());
+        }
+        scannedChars = '';
+      } else if (e.key.length === 1) {
+        scannedChars += e.key;
+      }
+      lastKeyTime = currentTime;
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [currentAsambleistas, currentUnidades, isFinished, isVoterModalOpen, isScannerOpen, isMassPrintOpen, loadingId]);
+
+  // Ref para el handler de escaneo para evitar reinicios de cámara por cambios de estado
+  const scanHandlerRef = useRef(handleScanToken);
+  useEffect(() => {
+    scanHandlerRef.current = handleScanToken;
+  }, [handleScanToken]);
+
+  // Manejo de Cámara Web con Html5Qrcode (Directo para mejor control de errores)
+  useEffect(() => {
+    let html5QrCode: Html5Qrcode | null = null;
+
+    const startScanner = async () => {
+      if (!isScannerOpen) return;
+
+      setCameraError(null);
+
+      // 1. Verificación de Contexto Seguro
+      if (!window.isSecureContext && window.location.hostname !== 'localhost') {
+        setCameraError("La cámara requiere una conexión segura (HTTPS) o localhost para funcionar.");
+        return;
+      }
+
+      // Pequeño retraso para asegurar que el DOM (#qr-reader) esté montado
+      await new Promise(resolve => setTimeout(resolve, 250));
+
+      const element = document.getElementById("qr-reader");
+      if (!element) {
+        console.error("qr-reader element not found in DOM");
+        return;
+      }
+
+      try {
+        // 2. Obtener Cámaras
+        const devices = await Html5Qrcode.getCameras();
+        setAvailableCameras(devices);
+
+        if (!devices || devices.length === 0) {
+          setCameraError("No se detectaron cámaras en este dispositivo.");
+          return;
+        }
+
+        const cameraId = activeCameraId || { facingMode: "environment" };
+        html5QrCode = new Html5Qrcode("qr-reader");
+
+        await html5QrCode.start(
+          cameraId,
+          {
+            fps: 20, // Aumentar FPS para detección más fluida
+            qrbox: { width: 250, height: 250 },
+            aspectRatio: 1.0 // Forzar formato cuadrado para evitar distorsiones lentas
+          },
+          (decodedText) => {
+            // Ya no cerramos la cámara ni el modal automáticamente
+            scanHandlerRef.current(decodedText);
+          },
+          undefined
+        );
+      } catch (err: any) {
+        console.error("Error starting camera:", err);
+        if (err.name === 'NotAllowedError' || err.message?.includes('Permission denied')) {
+          setCameraError("Permiso denegado. Por favor habilita el acceso a la cámara en tu navegador.");
+        } else if (err.name === 'NotFoundError' || err.message?.includes('Requested device not found')) {
+          setCameraError("No se encontró la cámara solicitada o está ocupada por otra aplicación.");
+        } else {
+          setCameraError("Error al iniciar la cámara: " + (err.message || "Error desconocido"));
+        }
+      }
+    };
+
+    startScanner();
+
+    return () => {
+      if (html5QrCode && html5QrCode.isScanning) {
+        html5QrCode.stop().catch(e => console.error("Error stopping scanner", e));
+      }
+    };
+  }, [isScannerOpen, activeCameraId]);
+
   // Cálculo del total de coeficientes en SALA (Agregado para el Footer)
   const totalInSalaCoef = useMemo(() => {
     return currentUnidades.reduce((acc, u) => {
@@ -132,11 +302,15 @@ export const AdminAsistenciaTab: React.FC<any> = () => {
     return ids;
   }, [currentAsambleistas, editingProxy]);
 
-  const availableUnitsForProxy = currentUnidades.filter(u =>
-    !excludedUnitIds.has(u.id) && // Ocultar unidades ya tomadas por otros apoderados
-    ((u.nombre || '').toLowerCase().includes(unitSearch.toLowerCase()) ||
-      (u.propietario || '').toLowerCase().includes(unitSearch.toLowerCase()))
-  );
+  const availableUnitsForProxy = useMemo(() => {
+    return currentUnidades
+      .filter(u =>
+        !excludedUnitIds.has(u.id) &&
+        ((u.nombre || '').toLowerCase().includes(unitSearch.toLowerCase()) ||
+          (u.propietario || '').toLowerCase().includes(unitSearch.toLowerCase()))
+      )
+      .sort((a, b) => (a.nombre || '').localeCompare(b.nombre || '', undefined, { numeric: true, sensitivity: 'base' }));
+  }, [currentUnidades, excludedUnitIds, unitSearch]);
 
   const visibleAsambleistaIds = useMemo(() => {
     return filteredUnidades
@@ -218,10 +392,15 @@ export const AdminAsistenciaTab: React.FC<any> = () => {
     }
   };
 
-  const handleOpenNewProxy = () => {
+  const handleOpenNewProxy = (unit?: Unidad) => {
     setEditingProxy(null);
     setProxyForm({ nombre: '', documento: '' });
-    setSelectedUnitIds([]);
+    if (unit) {
+      setSelectedUnitIds([unit.id]);
+      setUnitSearch('');
+    } else {
+      setSelectedUnitIds([]);
+    }
     setIsVoterModalOpen(true);
   };
 
@@ -302,16 +481,16 @@ export const AdminAsistenciaTab: React.FC<any> = () => {
     );
   };
 
-  // NUEVA FUNCIÓN: Solo Generar/Regenerar Códigos (DB)
+  // NUEVA FUNCIÓN: Solo Generar/Regenerar Códigos (DB) y Activar Masivamente
   const handleGenerateCodes = async () => {
     if (isFinished) return;
-    if (!confirm("Esto asegurará que todas las unidades tengan un código de acceso válido para ESTA asamblea. ¿Confirmar generación?")) return;
+    if (!confirm("Esto creará un código de acceso único y habilitará la entrada para todas las unidades al mismo tiempo.\n\n¿Desea activar masivamente a todos los asistentes?")) return;
     setIsGenerating(true);
     try {
       const result = await generateMassCredentials();
-      alert(`Proceso completado.\n\nCódigos Nuevos: ${result.created}\nCódigos Sincronizados: ${result.updated}\n\nAhora puede proceder a imprimir las fichas.`);
+      alert(`Proceso completado.\n\nAccesos Creados: ${result.created}\nAccesos Actualizados: ${result.updated}\n\nAhora puede proceder a imprimir las fichas o asignar poderes.`);
     } catch (error) {
-      alert("Error generando códigos.");
+      alert("Error activando asistentes.");
     } finally {
       setIsGenerating(false);
     }
@@ -387,67 +566,86 @@ export const AdminAsistenciaTab: React.FC<any> = () => {
           </div>
         )}
 
-        <div className="flex flex-col gap-5 mb-8">
-          {/* Row 1: Title + Search */}
-          <div className="flex flex-col md:flex-row justify-between items-center gap-4">
-            <h2 className="text-xl font-black text-slate-900 uppercase tracking-tight">Registro & Ingreso</h2>
-
-            <div className="relative w-full md:w-80">
-              <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" size={16} />
-              <input
-                type="text"
-                placeholder="Buscar unidad o propietario..."
-                value={searchTerm}
-                onChange={e => setSearchTerm(e.target.value)}
-                className="w-full pl-10 pr-4 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-sm font-bold focus:border-indigo-600 transition-colors"
-              />
+        <div className="flex flex-col gap-6 mb-8">
+          {/* Floating Feedback Alert */}
+          {scanFeedback && (
+            <div className={`fixed top-4 right-4 z-[9999] px-6 py-4 rounded-xl shadow-2xl font-black text-sm uppercase flex items-center gap-3 animate-in slide-in-from-top-10
+              ${scanFeedback.type === 'success' ? 'bg-emerald-600 text-white' : scanFeedback.type === 'error' ? 'bg-red-600 text-white' : 'bg-amber-500 text-white'}
+            `}>
+              {scanFeedback.type === 'success' ? <CheckCircle2 size={24} /> : scanFeedback.type === 'error' ? <AlertTriangle size={24} /> : <AlertTriangle size={24} />}
+              {scanFeedback.message}
             </div>
-          </div>
+          )}
 
-          {/* Row 2: Subtitle + Buttons */}
-          <div className="space-y-3">
-            <p className="text-xs text-slate-400 font-bold uppercase tracking-widest">Control de acceso y credenciales</p>
+          <div className="flex flex-col lg:flex-row justify-between lg:items-end gap-4">
+            <div className="shrink-0 mb-1 lg:mb-0">
+              <h2 className="text-xl font-black text-slate-900 uppercase tracking-tight">Registro & Ingreso</h2>
+            </div>
 
-            <div className="flex flex-wrap gap-2">
+            <div className="flex flex-wrap items-center justify-end gap-2 w-full lg:w-auto">
+              {/* 1. Buscador */}
+              <div className="relative flex-1 min-w-[180px] lg:w-60" data-tooltip="Buscar unidad por número o nombre">
+                <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" size={16} />
+                <input
+                  type="text"
+                  placeholder="Buscar unidad..."
+                  value={searchTerm}
+                  onChange={e => setSearchTerm(e.target.value)}
+                  className="w-full pl-10 pr-4 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-sm font-bold focus:border-indigo-600 transition-colors"
+                />
+              </div>
+
+              {/* 2. Escáner */}
               <button
-                onClick={handleOpenNewProxy}
+                onClick={() => setIsScannerOpen(true)}
                 disabled={isFinished}
-                className={`flex-1 sm:flex-none bg-indigo-600 text-white px-5 py-3 rounded-xl font-black text-xs uppercase flex items-center justify-center gap-2 shadow-lg transition-all ${isFinished ? 'opacity-50 cursor-not-allowed bg-slate-400' : 'hover:bg-indigo-700 active:scale-95'}`}
+                className={`flex-1 sm:flex-none px-4 py-2.5 bg-indigo-600 text-white rounded-xl shadow-md hover:bg-indigo-700 transition flex items-center justify-center gap-2 font-black uppercase text-xs shrink-0 ${isFinished ? 'opacity-50' : 'active:scale-95'}`}
+                data-tooltip="Abrir escáner de cámara web"
               >
-                <UserPlus size={16} /> <span className="hidden sm:inline">Apoderado</span><span className="sm:hidden">Poder</span>
+                <Camera size={16} /> <span className="hidden xl:inline">Escanear</span><span className="xl:hidden">Scan</span>
               </button>
 
-              {/* BOTÓN SEPARADO: BORRAR TOKENS */}
-              <button
-                onClick={handleClearCodes}
-                disabled={isClearing || isFinished}
-                className={`flex-1 sm:flex-none bg-red-50 text-red-600 border border-red-100 px-5 py-3 rounded-xl font-black text-xs uppercase flex items-center justify-center gap-2 transition-all ${isFinished ? 'opacity-50 cursor-not-allowed' : 'hover:bg-red-100 active:scale-95'}`}
-                title="Borrar todos los tokens para regenerar"
-              >
-                {isClearing ? <Loader2 size={16} className="animate-spin" /> : <Eraser size={16} />}
-                <span className="hidden sm:inline">Borrar Tokens</span>
-              </button>
-
-              {/* BOTÓN SEPARADO: GENERAR TOKENS */}
+              {/* 3. Activar (Generar Tokens) */}
               <button
                 onClick={handleGenerateCodes}
                 disabled={isGenerating || isFinished}
-                className={`flex-1 sm:flex-none bg-emerald-600 text-white px-5 py-3 rounded-xl font-black text-xs uppercase flex items-center justify-center gap-2 shadow-lg transition-all ${isFinished ? 'opacity-50 cursor-not-allowed bg-slate-400' : 'hover:bg-emerald-700 active:scale-95'}`}
-                title="Generar Códigos de Acceso"
+                className={`flex-1 sm:flex-none bg-emerald-600 text-white px-4 py-2.5 rounded-xl font-black text-xs uppercase flex items-center justify-center gap-2 shadow-md transition-all ${isFinished ? 'opacity-50 cursor-not-allowed bg-slate-400' : 'hover:bg-emerald-700 active:scale-95'}`}
+                data-tooltip="Generar credenciales y activar todas las unidades"
               >
-                {isGenerating ? <Loader2 size={16} className="animate-spin" /> : <Key size={16} />}
-                <span className="hidden sm:inline">Generar Tokens</span><span className="sm:hidden">Tokens</span>
+                {isGenerating ? <Loader2 size={16} className="animate-spin" /> : <QrCode size={16} />}
+                <span>Activar</span>
               </button>
 
-              {/* BOTÓN SEPARADO: IMPRIMIR */}
+              {/* 4. Imprimir */}
               <button
                 onClick={handlePrintCredentials}
                 disabled={isFinished}
-                className={`flex-1 sm:flex-none bg-slate-900 text-white px-5 py-3 rounded-xl font-black text-xs uppercase flex items-center justify-center gap-2 shadow-lg transition-all ${isFinished ? 'opacity-50 cursor-not-allowed bg-slate-400' : 'hover:bg-slate-800 active:scale-95'}`}
-                title="Imprimir Fichas"
+                className={`flex-1 sm:flex-none bg-slate-900 text-white px-4 py-2.5 rounded-xl font-black text-xs uppercase flex items-center justify-center gap-2 shadow-md transition-all ${isFinished ? 'opacity-50 cursor-not-allowed bg-slate-400' : 'hover:bg-slate-800 active:scale-95'}`}
+                data-tooltip="Imprimir fichas de QR para asistentes"
               >
-                <Printer size={16} />
-                <span className="hidden sm:inline">Imprimir Fichas</span><span className="sm:hidden">Imprimir</span>
+                <QrCode size={16} />
+                <span>Imprimir</span>
+              </button>
+
+              {/* 5. Borrar */}
+              <button
+                onClick={handleClearCodes}
+                disabled={isClearing || isFinished}
+                className={`flex-1 sm:flex-none bg-red-50 text-red-600 border border-red-100 px-4 py-2.5 rounded-xl font-black text-xs uppercase flex items-center justify-center gap-2 transition-all ${isFinished ? 'opacity-50 cursor-not-allowed' : 'hover:bg-red-100 active:scale-95'}`}
+                data-tooltip="Eliminar todos los tokens generados"
+              >
+                {isClearing ? <Loader2 size={16} className="animate-spin" /> : <QrCode size={16} />}
+                <span>Borrar</span>
+              </button>
+
+              {/* 6. Reporte Poderes */}
+              <button
+                onClick={() => setIsProxyReportOpen(true)}
+                disabled={isFinished}
+                className={`flex-1 sm:flex-none bg-indigo-50 text-indigo-700 px-4 py-2.5 rounded-xl font-black text-xs uppercase flex items-center justify-center gap-2 shadow-sm transition-all border border-indigo-100 ${isFinished ? 'opacity-50 cursor-not-allowed bg-slate-400' : 'hover:bg-indigo-100 active:scale-95'}`}
+                data-tooltip="Ver reporte detallado de poderes y delegaciones"
+              >
+                <UserCog size={16} /> <span>Poderes</span>
               </button>
             </div>
           </div>
@@ -585,22 +783,24 @@ export const AdminAsistenciaTab: React.FC<any> = () => {
                         >
                           <QrCode size={13} />
                         </button>
-                        {asm ? (
+                        {!asm?.esApoderado && !isPresent && (
+                          <button
+                            onClick={() => handleOpenNewProxy(u)}
+                            disabled={isFinished}
+                            className={`px-2 py-1.5 mr-1 bg-indigo-50 text-indigo-600 border border-indigo-100 text-[10px] sm:text-xs font-black uppercase rounded-lg transition-all flex items-center gap-1 w-[65px] justify-center ${isFinished ? 'opacity-50 cursor-not-allowed' : 'hover:bg-indigo-100'}`}
+                            title="Asignar Poder"
+                          >
+                            <UserPlus size={10} className="hidden lg:block shrink-0" />
+                            Poder
+                          </button>
+                        )}
+                        {asm && (
                           <button
                             onClick={() => handleToggle(asm.id)}
                             disabled={isLoading || isFinished}
-                            className={`min-w-[55px] sm:min-w-[65px] px-2 py-1.5 rounded-lg text-[10px] sm:text-xs font-black uppercase transition-all flex items-center justify-center ${isFinished ? 'opacity-50 cursor-not-allowed' : ''} ${isPresent ? 'bg-red-50 text-red-600 hover:bg-red-100' : 'bg-emerald-600 text-white hover:bg-emerald-700'}`}
+                            className={`min-w-[65px] sm:min-w-[75px] px-2 py-1.5 rounded-lg text-[10px] sm:text-xs font-black uppercase transition-all flex items-center justify-center ${isFinished ? 'opacity-50 cursor-not-allowed' : ''} ${isPresent ? 'bg-red-50 text-red-600 hover:bg-red-100' : 'bg-emerald-600 text-white hover:bg-emerald-700'}`}
                           >
-                            {isLoading ? <Loader2 size={10} className="animate-spin" /> : (isPresent ? 'OUT' : 'IN')}
-                          </button>
-                        ) : (
-                          <button
-                            onClick={() => handleQuickCreateToken(u)}
-                            disabled={isCreating || isFinished}
-                            className={`px-2 py-1.5 bg-slate-800 text-white text-[10px] sm:text-xs font-black uppercase rounded-lg transition-all flex items-center gap-1 ${isFinished ? 'opacity-50 cursor-not-allowed' : 'hover:bg-indigo-600'}`}
-                          >
-                            {isCreating ? <Loader2 size={10} className="animate-spin" /> : <Ticket size={10} />}
-                            Activar
+                            {isLoading ? <Loader2 size={10} className="animate-spin" /> : (isPresent ? 'OUT' : 'INGRESO')}
                           </button>
                         )}
                       </div>
@@ -655,222 +855,406 @@ export const AdminAsistenciaTab: React.FC<any> = () => {
       </div>
 
       {/* MODAL IMPRESIÓN MASIVA - 8 FICHAS POR PÁGINA */}
-      {isMassPrintOpen && createPortal(
-        <div className="fixed inset-0 z-[99999] bg-white flex flex-col print-modal-wrapper">
-          <style>{`
-             @media print {
-               @page { size: letter; margin: 0.5cm; }
-               
-               html, body { 
-                 height: auto !important; 
-                 overflow: visible !important; 
-                 background: white !important;
-               }
+      {
+        isMassPrintOpen && createPortal(
+          <div className="fixed inset-0 z-[99999] bg-white flex flex-col print-modal-wrapper">
+            <style>{`
+              @media print {
+                @page { size: letter; margin: 0.5cm; }
+                
+                html, body { 
+                  height: auto !important; 
+                  overflow: visible !important; 
+                  background: white !important;
+                  color: #000 !important;
+                }
 
-               /* Hide the main app root */
-               body > *:not(.print-modal-wrapper) {
-                 display: none !important;
-               }
-               
-               /* Show only our portal content */
-               .print-modal-wrapper { 
-                 position: static !important;
-                 top: 0 !important;
-                 left: 0 !important;
-                 width: 100% !important;
-                 height: auto !important;
-                 overflow: visible !important;
-                 display: block !important;
-                 background: white !important;
-               }
+                /* Hide the main app root */
+                body > *:not(.print-modal-wrapper) {
+                  display: none !important;
+                }
+                
+                /* Show only our portal content */
+                .print-modal-wrapper { 
+                  position: static !important;
+                  top: 0 !important;
+                  left: 0 !important;
+                  width: 100% !important;
+                  height: auto !important;
+                  overflow: visible !important;
+                  display: block !important;
+                  background: white !important;
+                }
 
-               .print-scroll-container {
-                 height: auto !important;
-                 overflow: visible !important;
-                 display: block !important;
-                 padding: 0 !important;
-               }
+                .print-scroll-container {
+                  height: auto !important;
+                  overflow: visible !important;
+                  display: block !important;
+                  padding: 0 !important;
+                }
 
-               .print-card-container { 
-                 display: grid !important; 
-                 grid-template-columns: 1fr 1fr !important; 
-                 gap: 0 !important; 
-                 width: 100% !important;
-                 margin: 0 !important;
-               }
+                .print-card-container { 
+                  display: grid !important; 
+                  grid-template-columns: 1fr 1fr !important; 
+                  gap: 0 !important; 
+                  width: 100% !important;
+                  margin: 0 !important;
+                }
 
-               .print-card { 
-                 height: 6.7cm !important;
-                 width: 100% !important;
-                 break-inside: avoid !important;
-                 page-break-inside: avoid !important;
-                 border: 1px dashed #000 !important; /* Changed to black for better visibility */
-                 -webkit-print-color-adjust: exact !important; /* Force print colors */
-                 print-color-adjust: exact !important;
-                 margin: 0 !important;
-                 padding: 8px !important;
-                 box-shadow: none !important;
-                 border-radius: 0 !important;
-                 display: flex !important;
-                 align-items: center !important;
-                 justify-content: space-between !important;
-               }
-               
-               .no-print { display: none !important; }
-               ::-webkit-scrollbar { display: none; }
-             }
-           `}</style>
+                .print-card { 
+                  height: 6.7cm !important;
+                  width: 100% !important;
+                  break-inside: avoid !important;
+                  page-break-inside: avoid !important;
+                  border: 1px dashed #000 !important;
+                  -webkit-print-color-adjust: exact !important;
+                  print-color-adjust: exact !important;
+                  margin: 0 !important;
+                  padding: 12px !important;
+                  box-shadow: none !important;
+                  border-radius: 0 !important;
+                  display: flex !important;
+                  align-items: center !important;
+                  justify-content: space-between !important;
+                  color: #000 !important;
+                }
+                
+                .print-card * {
+                  color: #000 !important;
+                  border-color: #000 !important;
+                }
+                
+                .print-card .bg-slate-900, 
+                .print-card .bg-black {
+                  background-color: #000 !important;
+                  color: #fff !important;
+                }
+                
+                .no-print { display: none !important; }
+                ::-webkit-scrollbar { display: none; }
+              }
+            `}</style>
 
-          {/* Header de Control */}
-          <div className="no-print p-6 bg-slate-900 text-white flex justify-between items-center shadow-xl shrink-0">
-            <div>
-              <h3 className="text-xl font-black uppercase leading-none">Impresión de Fichas</h3>
-              <p className="text-[10px] font-bold text-slate-400 uppercase mt-1">
-                Se generaron {currentAsambleistas.length} credenciales • Formato 8 fichas por página
-              </p>
+            {/* Header de Control */}
+            <div className="no-print p-6 bg-slate-900 text-white flex justify-between items-center shadow-xl shrink-0">
+              <div>
+                <h3 className="text-xl font-black uppercase leading-none">Impresión de Fichas</h3>
+                <p className="text-[10px] font-bold text-slate-400 uppercase mt-1">
+                  Se generaron {currentAsambleistas.length} credenciales • Formato 8 fichas por página
+                </p>
+              </div>
+              <div className="flex gap-3">
+                <button onClick={() => setIsMassPrintOpen(false)} className="px-6 py-3 rounded-xl font-black uppercase text-xs text-slate-400 hover:text-white transition-colors">Cerrar</button>
+                <button onClick={() => window.print()} className="bg-indigo-600 text-white px-8 py-3 rounded-xl font-black uppercase text-xs tracking-widest shadow-lg hover:bg-indigo-500 transition-all flex items-center gap-2">
+                  <Printer size={18} /> Imprimir Todo
+                </button>
+              </div>
             </div>
-            <div className="flex gap-3">
-              <button onClick={() => setIsMassPrintOpen(false)} className="px-6 py-3 rounded-xl font-black uppercase text-xs text-slate-400 hover:text-white transition-colors">Cerrar</button>
-              <button onClick={() => window.print()} className="bg-indigo-600 text-white px-8 py-3 rounded-xl font-black uppercase text-xs tracking-widest shadow-lg hover:bg-indigo-500 transition-all flex items-center gap-2">
-                <Printer size={18} /> Imprimir Todo
-              </button>
-            </div>
-          </div>
 
-          {/* Área de Credenciales */}
-          <div className="flex-1 overflow-y-auto p-4 sm:p-8 bg-slate-100 print:bg-white print:p-0 print-scroll-container">
-            <div className="max-w-[21cm] mx-auto grid grid-cols-1 sm:grid-cols-2 gap-4 print:gap-0 print-card-container">
-              {currentAsambleistas.map((asm) => {
-                const myUnits = unidades.filter(u => asm.unidadesIds.includes(u.id));
-                const totalCoef = myUnits.reduce((acc, u) => acc + (u.coeficiente || u.coefficient || 0), 0);
+            {/* Área de Credenciales */}
+            <div className="flex-1 overflow-y-auto p-4 sm:p-8 bg-slate-100 print:bg-white print:p-0 print-scroll-container">
+              <div className="max-w-[21cm] mx-auto grid grid-cols-1 sm:grid-cols-2 gap-4 print:gap-0 print-card-container">
+                {currentAsambleistas.map((asm) => {
+                  const myUnits = unidades.filter(u => asm.unidadesIds.includes(u.id));
+                  const totalCoef = myUnits.reduce((acc, u) => acc + (u.coeficiente || u.coefficient || 0), 0);
 
-                return (
-                  <div key={asm.id} className="print-card bg-white border border-dashed border-slate-300 p-4 flex items-center justify-between h-[6.8cm] relative overflow-hidden rounded-xl shadow-sm sm:shadow-none sm:rounded-none">
+                  return (
+                    <div key={asm.id} className="print-card bg-white border border-dashed border-black p-4 flex items-center justify-between h-[6.8cm] relative overflow-hidden rounded-xl shadow-sm sm:shadow-none sm:rounded-none">
 
-                    <div className="flex-1 pr-2 overflow-hidden">
-                      <h2 className="text-[10px] font-black uppercase text-slate-900 leading-none mb-1 truncate">{activeCopropiedad?.nombre}</h2>
-                      <p className="text-[8px] font-bold uppercase text-slate-500 tracking-widest mb-3 truncate">{activeAsamblea?.nombre}</p>
+                      <div className="w-[55%] pr-4 overflow-hidden flex flex-col justify-center">
+                        <h2 className="text-[10px] font-black uppercase text-black leading-none mb-1">{activeCopropiedad?.nombre}</h2>
+                        <p className="text-[8px] font-bold uppercase text-black tracking-widest mb-3">{activeAsamblea?.nombre}</p>
 
-                      <div className="inline-block bg-slate-900 text-white px-2 py-0.5 rounded text-[8px] font-black uppercase mb-1">
-                        {asm.esApoderado ? 'APODERADO' : 'PROPIETARIO'}
+                        <div className="inline-block bg-black text-white px-2 py-0.5 rounded text-[8px] font-black uppercase mb-1 w-fit">
+                          {asm.esApoderado ? 'APODERADO' : 'PROPIETARIO'}
+                        </div>
+                        <h3 className="text-base font-black uppercase leading-tight text-black">{asm.nombre}</h3>
+                        <p className="text-[12px] font-black text-black mt-2 leading-tight">UNIDAD: {myUnits.map(u => u.nombre).join(', ')}</p>
+                        <p className="text-[11px] font-black mt-1 text-black uppercase">Coeficiente: {totalCoef.toFixed(3)}%</p>
+
+                        <div className="flex items-center gap-1 mt-4 text-[7px] text-black">
+                          <Scissors size={8} /> Recortar por la línea punteada
+                        </div>
                       </div>
-                      <h3 className="text-sm font-black uppercase leading-tight line-clamp-1">{asm.nombre}</h3>
-                      <p className="text-[9px] font-bold text-slate-600 mt-1 line-clamp-1">{myUnits.map(u => u.nombre).join(', ')}</p>
-                      <p className="text-[8px] font-mono mt-0.5 text-slate-400">Coef: {totalCoef.toFixed(3)}%</p>
 
-                      <div className="flex items-center gap-1 mt-2 text-[7px] text-slate-300">
-                        <Scissors size={8} /> Recortar por la línea punteada
+                      <div className="w-[45%] flex flex-col items-center justify-center pl-4 border-l border-black shrink-0 h-full">
+                        <div className="w-full flex justify-center">
+                          <QRCodeCanvas value={`${getQrBaseUrl()}/?token=${asm.token}`} size={165} level="M" includeMargin={true} />
+                        </div>
+                        <p className="text-2xl font-black font-mono mt-2 tracking-[0.2em] text-black leading-none">{asm.token}</p>
+                        <p className="text-[8px] font-black uppercase text-black mt-1">Código de Acceso</p>
                       </div>
                     </div>
-
-                    <div className="flex flex-col items-center justify-center pl-2 border-l border-slate-100 shrink-0 w-[125px]">
-                      <QRCodeCanvas value={`${getQrBaseUrl()}/?token=${asm.token}`} size={115} level="L" includeMargin={true} />
-                      <p className="text-lg font-black font-mono mt-1 tracking-widest text-slate-900 leading-none">{asm.token}</p>
-                      <p className="text-[7px] font-bold uppercase text-slate-400">Código de Acceso</p>
-                    </div>
-                  </div>
-                );
-              })}
+                  );
+                })}
+              </div>
             </div>
-          </div>
-        </div>,
-        document.body
-      )}
+          </div>,
+          document.body
+        )
+      }
 
       {/* QR Modal Individual */}
-      {selectedForQR && (
-        <div className="fixed inset-0 z-[200] flex items-center justify-center bg-slate-900/60 backdrop-blur-md p-4 no-print">
-          <div className="bg-white rounded-[40px] w-full max-w-sm shadow-2xl overflow-hidden animate-in zoom-in duration-300">
-            <div className="p-4 border-b flex justify-between items-center bg-slate-50">
-              <h3 className="text-xs font-black text-slate-900 uppercase">Credencial</h3>
-              <button onClick={() => setSelectedForQR(null)} className="text-slate-400 hover:text-slate-900"><X size={20} /></button>
-            </div>
-            <div className="p-6 text-center space-y-4">
-              <div>
-                <h4 className="text-lg font-black text-slate-900 uppercase">{selectedForQR.nombre}</h4>
-                <p className="text-[9px] font-bold text-slate-400 uppercase tracking-widest">{activeCopropiedad?.nombre}</p>
+      {
+        selectedForQR && (
+          <div className="fixed inset-0 z-[200] flex items-center justify-center bg-slate-900/60 backdrop-blur-md p-4 no-print">
+            <div className="bg-white rounded-[40px] w-full max-w-sm shadow-2xl overflow-hidden animate-in zoom-in duration-300">
+              <div className="p-4 border-b flex justify-between items-center bg-slate-50">
+                <h3 className="text-xs font-black text-slate-900 uppercase">Credencial</h3>
+                <button onClick={() => setSelectedForQR(null)} className="text-slate-400 hover:text-slate-900"><X size={20} /></button>
               </div>
-              <div className="bg-white p-3 rounded-[32px] border flex justify-center items-center mx-auto w-fit">
-                <QRCodeCanvas value={`${getQrBaseUrl()}/?token=${selectedForQR.token}`} size={160} level="M" includeMargin={true} />
+              <div className="p-6 text-center space-y-4">
+                <div>
+                  <h4 className="text-lg font-black text-slate-900 uppercase">{selectedForQR.nombre}</h4>
+                  <p className="text-[9px] font-bold text-slate-400 uppercase tracking-widest">{activeCopropiedad?.nombre}</p>
+                </div>
+                <div className="bg-white p-3 rounded-[32px] border flex justify-center items-center mx-auto w-fit">
+                  <QRCodeCanvas value={`${getQrBaseUrl()}/?token=${selectedForQR.token}`} size={160} level="M" includeMargin={true} />
+                </div>
+                <div className="bg-slate-50 p-3 rounded-xl border border-slate-100">
+                  <p className="text-[11px] font-black text-slate-400 uppercase mb-1">Código Único</p>
+                  <p className="text-xl font-black text-indigo-600 tracking-widest">{selectedForQR.token}</p>
+                </div>
+                <button onClick={() => window.print()} className="w-full bg-slate-900 text-white py-3 rounded-xl font-black uppercase text-xs tracking-widest flex items-center justify-center gap-2">
+                  <Printer size={14} /> Imprimir
+                </button>
               </div>
-              <div className="bg-slate-50 p-3 rounded-xl border border-slate-100">
-                <p className="text-[11px] font-black text-slate-400 uppercase mb-1">Código Único</p>
-                <p className="text-xl font-black text-indigo-600 tracking-widest">{selectedForQR.token}</p>
-              </div>
-              <button onClick={() => window.print()} className="w-full bg-slate-900 text-white py-3 rounded-xl font-black uppercase text-xs tracking-widest flex items-center justify-center gap-2">
-                <Printer size={14} /> Imprimir
-              </button>
             </div>
           </div>
-        </div>
-      )}
+        )
+      }
 
       {/* Registrar Apoderado Modal */}
-      {isVoterModalOpen && (
-        <div className="fixed inset-0 z-[150] flex items-end sm:items-center justify-center bg-slate-900/60 backdrop-blur-md p-0 sm:p-4 no-print">
-          <div className="bg-white rounded-t-[32px] sm:rounded-[40px] w-full max-w-lg shadow-2xl overflow-hidden animate-in slide-in-from-bottom duration-300 flex flex-col max-h-[95vh]">
-            <div className="p-6 border-b flex justify-between items-center bg-slate-50 shrink-0">
-              <div className="flex items-center gap-2">
-                {editingProxy ? <UserCog className="text-indigo-600" size={20} /> : <UserPlus className="text-indigo-600" size={20} />}
-                <h3 className="text-base font-black text-slate-900 uppercase">{editingProxy ? 'Editar Apoderado' : 'Nuevo Apoderado'}</h3>
+      {
+        isVoterModalOpen && (
+          <div className="fixed inset-0 z-[150] flex items-end sm:items-center justify-center bg-slate-900/60 backdrop-blur-md p-0 sm:p-4 no-print">
+            <div className="bg-white rounded-t-[32px] sm:rounded-[40px] w-full max-w-lg shadow-2xl overflow-hidden animate-in slide-in-from-bottom duration-300 flex flex-col max-h-[95vh]">
+              <div className="p-6 border-b flex justify-between items-center bg-slate-50 shrink-0">
+                <div className="flex items-center gap-2">
+                  {editingProxy ? <UserCog className="text-indigo-600" size={20} /> : <UserPlus className="text-indigo-600" size={20} />}
+                  <h3 className="text-base font-black text-slate-900 uppercase">{editingProxy ? 'Editar Apoderado' : 'Nuevo Apoderado'}</h3>
+                </div>
+                <button onClick={() => setIsVoterModalOpen(false)} className="text-slate-400 hover:text-slate-900"><X size={24} /></button>
               </div>
-              <button onClick={() => setIsVoterModalOpen(false)} className="text-slate-400 hover:text-slate-900"><X size={24} /></button>
-            </div>
 
-            <div className="p-4 sm:p-8 space-y-5 overflow-y-auto custom-scrollbar">
-              <form id="proxyForm" onSubmit={handleRegisterProxy} className="space-y-4">
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                  <div className="space-y-1">
-                    <label className="text-[11px] font-black uppercase text-slate-400 ml-1">Nombre</label>
-                    <input disabled={!!editingProxy} required type="text" placeholder="Nombre completo" value={proxyForm.nombre} onChange={e => setProxyForm({ ...proxyForm, nombre: e.target.value })} className="w-full px-4 py-3 bg-slate-50 border rounded-xl font-bold text-sm disabled:opacity-60 disabled:cursor-not-allowed" />
-                  </div>
-                  <div className="space-y-1">
-                    <label className="text-[11px] font-black uppercase text-slate-400 ml-1">Documento</label>
-                    <input disabled={!!editingProxy} required type="text" placeholder="ID / Cédula" value={proxyForm.documento} onChange={e => setProxyForm({ ...proxyForm, documento: e.target.value })} className="w-full px-4 py-3 bg-slate-50 border rounded-xl font-bold text-sm disabled:opacity-60 disabled:cursor-not-allowed" />
-                  </div>
-                </div>
-
-                <div className="space-y-2">
-                  <div className="flex justify-between items-center px-1">
-                    <label className="text-[11px] font-black uppercase text-slate-400">Unidades Asignadas ({selectedUnitIds.length})</label>
-                    <button type="button" onClick={() => setSelectedUnitIds([])} className="text-[11px] font-black text-indigo-600 uppercase">Limpiar</button>
+              <div className="p-4 sm:p-8 space-y-5 overflow-y-auto custom-scrollbar">
+                <form id="proxyForm" onSubmit={handleRegisterProxy} className="space-y-4">
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                    <div className="space-y-1">
+                      <label className="text-[11px] font-black uppercase text-slate-400 ml-1">Nombre</label>
+                      <input disabled={!!editingProxy} required type="text" placeholder="Nombre completo" value={proxyForm.nombre} onChange={e => setProxyForm({ ...proxyForm, nombre: e.target.value })} className="w-full px-4 py-3 bg-slate-50 border rounded-xl font-bold text-sm disabled:opacity-60 disabled:cursor-not-allowed" />
+                    </div>
+                    <div className="space-y-1">
+                      <label className="text-[11px] font-black uppercase text-slate-400 ml-1">Documento</label>
+                      <input disabled={!!editingProxy} required type="text" placeholder="ID / Cédula" value={proxyForm.documento} onChange={e => setProxyForm({ ...proxyForm, documento: e.target.value })} className="w-full px-4 py-3 bg-slate-50 border rounded-xl font-bold text-sm disabled:opacity-60 disabled:cursor-not-allowed" />
+                    </div>
                   </div>
 
-                  <div className="relative">
-                    <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" size={14} />
-                    <input type="text" placeholder="Filtrar unidades..." value={unitSearch} onChange={e => setUnitSearch(e.target.value)} className="w-full pl-9 pr-4 py-2 bg-slate-50 border border-slate-200 rounded-xl text-sm" />
-                  </div>
+                  <div className="space-y-2">
+                    <div className="flex justify-between items-center px-1">
+                      <label className="text-[11px] font-black uppercase text-slate-400">Unidades Asignadas ({selectedUnitIds.length})</label>
+                      <button type="button" onClick={() => setSelectedUnitIds([])} className="text-[11px] font-black text-indigo-600 uppercase">Limpiar</button>
+                    </div>
 
-                  <div className="border border-slate-100 rounded-2xl max-h-[250px] overflow-y-auto p-2 bg-slate-50 grid grid-cols-2 sm:grid-cols-3 gap-2">
-                    {availableUnitsForProxy.map(u => (
-                      <div
-                        key={u.id}
-                        onClick={() => toggleUnitSelection(u.id)}
-                        className={`p-3 rounded-xl cursor-pointer text-center transition-all border ${selectedUnitIds.includes(u.id) ? 'bg-indigo-600 border-indigo-600 text-white shadow-md' : 'bg-white border-white hover:bg-indigo-50 text-slate-700'}`}
-                      >
-                        <p className="font-black text-xs uppercase truncate">{u.nombre}</p>
-                        <p className={`text-[10px] truncate opacity-60`}>{u.propietario}</p>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              </form>
-            </div>
+                    <div className="relative">
+                      <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" size={14} />
+                      <input type="text" placeholder="Filtrar unidades..." value={unitSearch} onChange={e => setUnitSearch(e.target.value)} className="w-full pl-9 pr-4 py-2 bg-slate-50 border border-slate-200 rounded-xl text-sm" />
+                    </div>
 
-            <div className="p-4 sm:p-6 border-t bg-slate-50 shrink-0">
-              <button
-                type="submit"
-                form="proxyForm"
-                disabled={isSubmitting}
-                className="w-full bg-indigo-600 text-white py-4 rounded-xl font-black uppercase text-sm tracking-widest shadow-xl flex items-center justify-center gap-2"
-              >
-                {isSubmitting ? <Loader2 size={16} className="animate-spin" /> : (editingProxy ? <UserCog size={16} /> : <UserPlus size={16} />)}
-                {editingProxy ? 'Actualizar Asignación' : 'Confirmar Registro'}
-              </button>
+                    <div className="border border-slate-100 rounded-2xl max-h-[250px] overflow-y-auto bg-slate-50 flex flex-col divide-y divide-slate-100">
+                      {availableUnitsForProxy.map(u => (
+                        <div
+                          key={u.id}
+                          onClick={() => toggleUnitSelection(u.id)}
+                          className={`p-3 cursor-pointer flex items-center justify-between transition-all ${selectedUnitIds.includes(u.id) ? 'bg-indigo-50 hover:bg-indigo-100' : 'bg-white hover:bg-slate-50'}`}
+                        >
+                          <div className="flex flex-col">
+                            <p className={`font-black uppercase text-sm ${selectedUnitIds.includes(u.id) ? 'text-indigo-700' : 'text-slate-800'}`}>{u.nombre}</p>
+                            <p className="text-[10px] text-slate-500 font-medium truncate max-w-[200px] sm:max-w-xs">{u.propietario || 'Sin Propietario'}</p>
+                          </div>
+                          <div>
+                            <div className={`w-5 h-5 rounded flex items-center justify-center border transition-colors ${selectedUnitIds.includes(u.id) ? 'bg-indigo-600 border-indigo-600 text-white' : 'border-slate-300 bg-white'}`}>
+                              {selectedUnitIds.includes(u.id) && <CheckSquare size={14} />}
+                            </div>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                </form>
+              </div>
+
+              <div className="p-4 sm:p-6 border-t bg-slate-50 shrink-0">
+                <button
+                  type="submit"
+                  form="proxyForm"
+                  disabled={isSubmitting}
+                  className="w-full bg-indigo-600 text-white py-4 rounded-xl font-black uppercase text-sm tracking-widest shadow-xl flex items-center justify-center gap-2"
+                >
+                  {isSubmitting ? <Loader2 size={16} className="animate-spin" /> : (editingProxy ? <UserCog size={16} /> : <UserPlus size={16} />)}
+                  {editingProxy ? 'Actualizar Asignación' : 'Confirmar Registro'}
+                </button>
+              </div>
             </div>
           </div>
-        </div>
-      )}
-    </div>
+        )
+      }
+
+      {/* MODAL REPORTE DE PODERES */}
+      {
+        isProxyReportOpen && (
+          <div className="fixed inset-0 z-[200] flex items-center justify-center bg-slate-900/60 backdrop-blur-md p-4 no-print">
+            <div className="bg-white rounded-[40px] w-full max-w-4xl shadow-2xl overflow-hidden animate-in zoom-in duration-300 max-h-[90vh] flex flex-col">
+              <div className="p-6 border-b flex justify-between items-center bg-slate-50 shrink-0">
+                <div>
+                  <h3 className="text-xl font-black text-slate-900 uppercase tracking-tight">Reporte de Poderes</h3>
+                  <p className="text-xs font-bold text-slate-400 uppercase mt-1">{activeCopropiedad?.nombre} - {activeAsamblea?.nombre}</p>
+                </div>
+                <div className="flex items-center gap-3">
+                  <button onClick={() => {
+                    const printContent = document.getElementById('proxy-report-print-content');
+                    if (printContent) {
+                      const originalBody = document.body.innerHTML;
+                      document.body.innerHTML = printContent.innerHTML;
+                      window.print();
+                      document.body.innerHTML = originalBody;
+                      window.location.reload();
+                    } else {
+                      window.print();
+                    }
+                  }} className="bg-indigo-600 text-white px-5 py-2.5 rounded-xl font-black text-xs uppercase flex items-center gap-2 hover:bg-indigo-700 transition" title="Muestra solo este documento al imprimir" >
+                    <Printer size={16} /> Imprimir
+                  </button>
+                  <button onClick={() => setIsProxyReportOpen(false)} className="text-slate-400 hover:text-slate-900"><X size={24} /></button>
+                </div>
+              </div>
+
+              <div className="p-6 overflow-y-auto bg-slate-50 flex-1 relative" id="proxy-report-print-content">
+                {/* Estilos para que el reporte se imprima limpio si usamos el truco de reemplazar el body */}
+                <style>{`
+                         @media print {
+                             @page { margin: 1.5cm; }
+                             body { background: white !important; font-family: sans-serif; }
+                             .no-print { display: none !important; }
+                             .print-only { display: block !important; }
+                         }
+                    `}</style>
+                <div className="hidden print:block mb-8 border-b-2 border-slate-900 pb-4 print-only">
+                  <h1 className="text-2xl font-black uppercase text-center">{activeCopropiedad?.nombre}</h1>
+                  <h2 className="text-lg font-bold uppercase text-center text-slate-600 mt-2">Reporte de Poderes / Representación</h2>
+                  <p className="text-sm font-medium text-center text-slate-500 mt-1">{activeAsamblea?.nombre}</p>
+                </div>
+
+                {currentAsambleistas.filter(a => a.esApoderado).length === 0 ? (
+                  <div className="text-center py-12 text-slate-400 font-bold uppercase text-sm">
+                    No hay apoderados registrados en esta asamblea.
+                  </div>
+                ) : (
+                  <div className="grid grid-cols-1 gap-4">
+                    {currentAsambleistas.filter(a => a.esApoderado).map(asm => {
+                      const myUnits = unidades.filter(u => asm.unidadesIds.includes(u.id));
+                      const totalCoef = myUnits.reduce((acc, u) => acc + (u.coeficiente || u.coefficient || 0), 0);
+                      return (
+                        <div key={asm.id} className="bg-white p-4 sm:p-5 rounded-2xl border border-slate-200 shadow-sm flex flex-col sm:flex-row gap-4 justify-between items-start sm:items-center break-inside-avoid shadow-none print:border-black print:rounded-none">
+                          <div className="flex-1">
+                            <div className="flex items-center gap-2 mb-1">
+                              <span className="bg-indigo-100 text-indigo-800 text-[10px] px-2 py-0.5 rounded uppercase font-black print:border print:border-black">Apoderado</span>
+                              <h4 className="font-black text-slate-900 uppercase text-sm sm:text-base">{asm.nombre}</h4>
+                            </div>
+                            <p className="text-xs text-slate-500 font-medium">Documento: <span className="font-bold">{asm.documento || 'No registrado'}</span></p>
+                          </div>
+                          <div className="flex-1 w-full sm:w-auto mt-2 sm:mt-0">
+                            <p className="text-[10px] font-black uppercase text-slate-400 mb-1">Unidades Representadas ({myUnits.length})</p>
+                            <div className="flex flex-wrap gap-1.5">
+                              {myUnits.map(u => (
+                                <span key={u.id} className="bg-slate-100 text-slate-700 px-2 py-1 rounded-lg text-[10px] font-bold border border-slate-200 print:border-black">
+                                  {u.nombre}
+                                </span>
+                              ))}
+                            </div>
+                          </div>
+                          <div className="w-full sm:w-32 text-left sm:text-right mt-3 sm:mt-0 pt-3 sm:pt-0 border-t sm:border-0 border-slate-100">
+                            <p className="text-[10px] font-black uppercase text-slate-400">Poder Total</p>
+                            <span className="text-lg font-black text-indigo-600 font-mono leading-none">{totalCoef.toFixed(3)}%</span>
+                          </div>
+                        </div>
+                      )
+                    })}
+                  </div>
+                )}
+              </div>
+            </div>
+          </div>
+        )
+      }
+
+      {/* MODAL ESCANER CAMARA WEB */}
+      {
+        isScannerOpen && (
+          <div className="fixed inset-0 z-[200] flex items-center justify-center bg-slate-900/80 backdrop-blur-md p-4">
+            <div className="bg-white rounded-3xl w-full max-w-md shadow-2xl overflow-hidden animate-in zoom-in duration-300">
+              <div className="p-4 border-b flex justify-between items-center bg-slate-50">
+                <div className="flex items-center gap-2">
+                  <Camera className="text-indigo-600" size={20} />
+                  <h3 className="text-base font-black text-slate-900 uppercase">Escanear Credencial</h3>
+                </div>
+                <button onClick={() => setIsScannerOpen(false)} className="text-slate-400 hover:text-slate-900"><X size={24} /></button>
+              </div>
+              <div className="p-4 bg-slate-100 flex flex-col items-center min-h-[300px] justify-center">
+                {/* Contenedor de cámara SIEMPRE presente en el DOM para evitar re-inicializaciones fallidas */}
+                <div
+                  id="qr-reader"
+                  className={`w-full max-w-[350px] mx-auto rounded-xl overflow-hidden bg-white shadow-inner border-4 border-white shadow-xl ${cameraError ? 'hidden' : 'block'}`}
+                ></div>
+
+                {cameraError ? (
+                  <div className="w-full bg-red-50 border border-red-200 p-6 rounded-2xl flex flex-col items-center text-center animate-in zoom-in">
+                    <AlertTriangle className="text-red-600 mb-3" size={40} />
+                    <h4 className="font-black text-red-900 uppercase text-xs mb-2">Error de Cámara</h4>
+                    <p className="text-[11px] font-bold text-red-700 leading-relaxed max-w-[280px]">{cameraError}</p>
+
+                    <div className="mt-6 flex flex-col gap-2 w-full">
+                      <button
+                        onClick={() => { setCameraError(null); setActiveCameraId(null); }}
+                        className="bg-red-600 text-white py-2 px-4 rounded-xl font-black uppercase text-[10px] tracking-widest shadow-lg active:scale-95 transition"
+                      >
+                        Reintentar
+                      </button>
+                      <p className="text-[9px] text-slate-400 font-medium">Tip: Asegúrate de que ninguna otra app use la cámara y de haber aceptado los permisos.</p>
+                    </div>
+                  </div>
+                ) : (
+                  <>
+                    {availableCameras.length > 1 && (
+                      <div className="mt-4 w-full px-4">
+                        <label className="text-[10px] font-black uppercase text-slate-400 mb-1 block ml-1">Cambiar Cámara</label>
+                        <select
+                          value={activeCameraId || ''}
+                          onChange={(e) => setActiveCameraId(e.target.value)}
+                          className="w-full bg-white border border-slate-200 rounded-lg p-2 text-[10px] font-bold uppercase shadow-sm outline-none focus:border-indigo-600"
+                        >
+                          {availableCameras.map(cam => (
+                            <option key={cam.id} value={cam.id}>{cam.label || `Cámara ${availableCameras.indexOf(cam) + 1}`}</option>
+                          ))}
+                        </select>
+                      </div>
+                    )}
+
+                    <p className="mt-4 text-xs font-bold text-slate-500 uppercase text-center">Apunte el código QR hacia la cámara para registrar el ingreso automáticamente.</p>
+
+                    <button
+                      onClick={() => setIsScannerOpen(false)}
+                      className="mt-6 w-full bg-slate-900 text-white py-3.5 rounded-2xl font-black uppercase text-xs tracking-widest shadow-xl hover:bg-slate-800 transition-all active:scale-95 flex items-center justify-center gap-2"
+                    >
+                      <X size={16} /> Finalizar Escaneo
+                    </button>
+                  </>
+                )}
+              </div>
+            </div>
+          </div>
+        )
+      }
+    </div >
   );
 };

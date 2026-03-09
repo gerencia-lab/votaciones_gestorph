@@ -140,6 +140,7 @@ export interface Pregunta {
   esVerificacionQuorum?: boolean;
   esMultiple?: boolean;
   createdAt?: string; // Nuevo campo para ordenamiento
+  orden?: number;     // Índice de posición para el orden del día (drag & drop)
 }
 
 export interface Voto {

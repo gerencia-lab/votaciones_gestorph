@@ -133,6 +133,7 @@ interface AssemblyContextType {
     reopenQuestion: (id: string, tiempo: number) => Promise<void>;
     submitVote: (qId: string, asmId: string, selection: string[]) => Promise<void>;
     calculateResults: (qId: string, type: 'coeficiente' | 'nominal') => any[];
+    reorderQuestions: (orderedIds: string[]) => Promise<void>;
 
     getVoterCoefficient: (voter: Asambleista | null) => number;
     getVoterUnidades: (voter: Asambleista | null) => Unidad[];
@@ -621,7 +622,13 @@ export const AssemblyProvider: React.FC<{ children: ReactNode }> = ({ children }
         const firstUnitId = data.unitIds[0];
         const firstUnit = unidades.find(u => u.id === firstUnitId);
 
-        let tokenToUse = await generateUnitToken();
+        let tokenToUse = data.tokenToUse;
+        if (!tokenToUse) {
+            tokenToUse = firstUnit?.token || await generateUnitToken();
+            if (firstUnit && !firstUnit.token) {
+                await updateDoc(doc(db, "unidades", firstUnitId), { token: tokenToUse });
+            }
+        }
 
         await addDoc(collection(db, "asambleistas"), {
             nombre: data.nombre, documento: data.documento, esApoderado: true, unidadesIds: data.unitIds,
@@ -785,6 +792,14 @@ export const AssemblyProvider: React.FC<{ children: ReactNode }> = ({ children }
         await batch.commit();
     };
 
+    const reorderQuestions = async (orderedIds: string[]) => {
+        const batch = writeBatch(db);
+        orderedIds.forEach((id, index) => {
+            batch.update(doc(db, "preguntas", id), { orden: index });
+        });
+        await batch.commit();
+    };
+
     const submitVote = async (qId: string, asmId: string, selection: string[]) => {
         const existing = votos.find(v => v.preguntaId === qId && v.asambleistaId === asmId);
         if (existing) return;
@@ -908,7 +923,7 @@ export const AssemblyProvider: React.FC<{ children: ReactNode }> = ({ children }
             approveLoyaltyTransaction, rejectLoyaltyTransaction,
             addUnit, updateUnit, deleteUnit, bulkAddUnits, regenerateUnitToken, getTotalBuildingCoefficient,
             addAsambleista, deleteAsambleista, toggleAttendance, updateBatchAttendance, registerProxy, unlinkProxyUnits, addProxyUnits, getAsambleistaByUnit, generateMassCredentials, clearMassCredentials,
-            addQuestion, updateQuestion, openQuestion, closeQuestion, reopenQuestion, submitVote, calculateResults,
+            addQuestion, updateQuestion, openQuestion, closeQuestion, reopenQuestion, submitVote, calculateResults, reorderQuestions,
             getVoterCoefficient, getVoterUnidades, initializeDatabase,
             generateAssemblySummary, saveManualSummary, sendEmailInvitation, registerBulkEmailSent
         }}>

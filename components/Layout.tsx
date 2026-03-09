@@ -72,7 +72,7 @@ export const Layout: React.FC<LayoutProps> = ({ children, title, onBackToHome, h
           </button>
 
           {!hideHeaderStatus && (
-            <div className="flex items-center gap-2 bg-indigo-800/50 px-3 py-1.5 rounded-full border border-indigo-600/50 shadow-inner">
+            <div className="hidden sm:flex items-center gap-2 bg-indigo-800/50 px-3 py-1.5 rounded-full border border-indigo-600/50 shadow-inner">
               {isDbReady ? (
                 <>
                   <div className="w-2 h-2 bg-emerald-400 rounded-full animate-pulse shadow-[0_0_8px_rgba(52,211,153,0.8)]"></div>
