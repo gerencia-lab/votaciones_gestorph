@@ -404,18 +404,20 @@ export const AdminVotacionesTab: React.FC<AdminVotacionesTabProps> = ({ setView 
                 <div className="flex gap-1.5 items-center">
                   {/* MODIFIED: Add Status Buttons always visible (or at least when open/closed) */}
                   <button
-                    onClick={() => setViewingVotedFor(p.id)}
-                    className="p-2.5 rounded-xl bg-emerald-50 text-emerald-600 hover:bg-emerald-100 transition-colors"
-                    title="Ver quiénes votaron"
+                    onClick={() => { if (!isFinished) setViewingVotedFor(p.id); }}
+                    disabled={isFinished}
+                    className={`p-2.5 rounded-xl transition-colors ${isFinished ? 'bg-slate-50 text-slate-300 cursor-not-allowed' : 'bg-emerald-50 text-emerald-600 hover:bg-emerald-100'}`}
+                    title={isFinished ? 'Bloqueado — Asamblea finalizada' : 'Ver quiénes votaron'}
                   >
-                    <UserCheck size={16} />
+                    {isFinished ? <Lock size={16} /> : <UserCheck size={16} />}
                   </button>
                   <button
-                    onClick={() => setViewingMissingFor(p.id)}
-                    className="p-2.5 rounded-xl bg-amber-50 text-amber-600 hover:bg-amber-100 transition-colors"
-                    title="Ver quiénes faltan"
+                    onClick={() => { if (!isFinished) setViewingMissingFor(p.id); }}
+                    disabled={isFinished}
+                    className={`p-2.5 rounded-xl transition-colors ${isFinished ? 'bg-slate-50 text-slate-300 cursor-not-allowed' : 'bg-amber-50 text-amber-600 hover:bg-amber-100'}`}
+                    title={isFinished ? 'Bloqueado — Asamblea finalizada' : 'Ver quiénes faltan'}
                   >
-                    <UserX size={16} />
+                    {isFinished ? <Lock size={16} /> : <UserX size={16} />}
                   </button>
                   <div className="w-px h-6 bg-slate-200 mx-1"></div>
 
